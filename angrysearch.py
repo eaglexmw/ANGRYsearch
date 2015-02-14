@@ -6,9 +6,8 @@ import sys
 import locale
 import sqlite3
 import subprocess
-from PyQt5.QtCore import *
-from PyQt5.QtWidgets import *
-from PyQt5.QtGui import *
+from PySide.QtCore import *
+from PySide.QtGui import *
 from datetime import datetime
 import base64
 
@@ -16,7 +15,7 @@ import base64
 # QTHREAD FOR ASYNC SEARCHES IN THE DATABASE
 # RETURNS FIRST 500 RESULTS MATCHING THE QUERY
 class thread_db_query(QThread):
-    db_query_signal = pyqtSignal(list)
+    db_query_signal = Signal(list)
 
     def __init__(self, db_query, parent=None):
         super(thread_db_query, self).__init__(parent)
@@ -35,7 +34,7 @@ class thread_db_query(QThread):
 # QTHREAD FOR UPDATING THE DATABASE
 # PREVENTS LOCKING UP THE GUI AND ALLOWS TO SHOW PROGRESS AS IT GOES
 class thread_database_update(QThread):
-    db_update_signal = pyqtSignal(str)
+    db_update_signal = Signal(str)
 
     def __init__(self, sudo_passwd, parent=None):
         self.db_path = '/var/lib/angrysearch/angry_database.db'
@@ -274,12 +273,16 @@ class GUI_MainWindow(QMainWindow):
 
     def single_click(self, QModelIndex):
         path = QModelIndex.data()
+        self.status_bar.showMessage('')
         if not os.path.exists(path):
             self.status_bar.showMessage('not found - update database')
             return
 
         mime = subprocess.check_output(['xdg-mime', 'query', 'filetype', path])
         mime = mime.decode("latin-1").strip()
+        defautl_app = subprocess.check_output(['xdg-mime', 'query',
+                                              'default', mime])
+        defautl_app = defautl_app.decode("utf-8").strip()
         self.status_bar.showMessage(str(mime))
 
     def double_click(self, QModelIndex):
@@ -332,7 +335,7 @@ class sudo_dialog(QDialog):
         self.setWindowTitle('Database Update')
         self.label_0 = QLabel('sudo password:')
         self.passwd_input = QLineEdit()
-        self.passwd_input.setEchoMode(QLineEdit.Password)
+        self.passwd_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.label_1 = QLabel('• sudo updatedb')
         self.label_2 = QLabel('• sudo locate * > /tmp/tempfile')
         self.label_3 = QLabel('• new database from the tempfile')
