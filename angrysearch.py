@@ -571,7 +571,7 @@ class HTMLDelegate(QStyledItemDelegate):
             ctx.palette.setColor(QPalette.Text, option.palette.color(
                                  QPalette.Active, QPalette.HighlightedText))
 
-        textRect = style.subElementRect(QStyle.SE_ItemViewItemText, options)
+        textRect = style.subElementRect(QStyle.SE_ItemViewItemText, options, None)
         painter.translate(textRect.topLeft())
         self.doc.documentLayout().draw(painter, ctx)
 
