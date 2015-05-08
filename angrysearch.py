@@ -1,38 +1,57 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-import os
-import sys
+import base64
+from datetime import datetime
 import locale
-import sqlite3
-import subprocess
+import os
 from PySide.QtCore import *
 from PySide.QtGui import *
-from datetime import datetime
-import base64
+import re
+import scandir
+import sqlite3
+import subprocess
+import sys
 
 
+# print(os.__file__)
 # QTHREAD FOR ASYNC SEARCHES IN THE DATABASE
-# RETURNS FIRST 500 RESULTS MATCHING THE QUERY
+# CALLED ON EVERY KEYPRESS
+# RETURNS FIRST 500(numb_results) RESULTS MATCHING THE QUERY
 class thread_db_query(QThread):
-    db_query_signal = Signal(list)
+    db_query_signal = Signal(dict)
 
-    def __init__(self, db_query, parent=None):
+    def __init__(self, db_query, numb_results, parent=None):
         super(thread_db_query, self).__init__(parent)
+        self.numb_results = numb_results
         self.db_query = db_query
-        self.exiting = False
+        strip_and_split = db_query.strip('*').split('*')
+        rx = '('+'|'.join(map(re.escape, strip_and_split))+')'
+        self.regex_queries = re.compile(rx, re.IGNORECASE)
 
     def run(self):
         cur = con.cursor()
-        cur.execute('SELECT file_path_col FROM vt_locate_data_table WHERE '
-                    'file_path_col MATCH ? LIMIT 500',
-                    ('%'+self.db_query+'%',))
-        result = cur.fetchall()
-        self.db_query_signal.emit([i[0] for i in result])
+        cur.execute('''SELECT * FROM vt_locate_data_table WHERE file_path_col
+                        MATCH ? LIMIT ?''',
+                    (self.db_query, self.numb_results))
+        tuppled_500 = cur.fetchall()
+
+        bold_results_500 = []
+
+        for tup in tuppled_500:
+            bold = self.bold_text(tup[1])
+            item = {'dir': tup[0], 'path': tup[1], 'bold_path': bold}
+            bold_results_500.append(item)
+
+        signal_message = {'input': self.db_query, 'results': bold_results_500}
+        self.db_query_signal.emit(signal_message)
+
+    def bold_text(self, line):
+        return re.sub(self.regex_queries, '<b>\\1</b>', line)
 
 
 # QTHREAD FOR UPDATING THE DATABASE
-# PREVENTS LOCKING UP THE GUI AND ALLOWS TO SHOW PROGRESS AS IT GOES
+# PREVENTS LOCKING UP THE GUI AND ALLOWS TO SHOW STEPS PROGRESS
 class thread_database_update(QThread):
     db_update_signal = Signal(str)
 
@@ -41,63 +60,71 @@ class thread_database_update(QThread):
         self.temp_db_path = '/tmp/angry_database.db'
         super(thread_database_update, self).__init__(parent)
         self.sudo_passwd = sudo_passwd
-        self.exiting = False
-        self.file_manager = False
+        self.table = []
 
     def run(self):
-        the_temp_file = '/tmp/angry_{}'.format(os.getpid())
-        with open(the_temp_file, 'w+', encoding="utf-8") as self.temp_file:
+        self.db_update_signal.emit('label_1')
+        self.crawling_drives()
 
-            self.db_update_signal.emit('label_1')
-            self.sudo_updatedb()
+        self.db_update_signal.emit('label_2')
+        self.new_database()
 
-            self.db_update_signal.emit('label_2')
-            self.locate_to_file()
+        self.db_update_signal.emit('label_3')
+        self.replace_old_db_with_new()
 
-            self.db_update_signal.emit('label_3')
-            self.new_database()
-
-            self.db_update_signal.emit('label_4')
-            self.indexing_new_database()
-
-            self.db_update_signal.emit('label_5')
-            self.replace_old_db_with_new()
-
-        os.remove(the_temp_file)
         self.db_update_signal.emit('the_end_of_the_update')
 
-    def sudo_updatedb(self):
-        cmd = ['sudo', '-S', 'updatedb']
-        p = subprocess.Popen(cmd, stderr=subprocess.PIPE,
-                             stdin=subprocess.PIPE)
-        p.stdin.write(bytes(self.sudo_passwd+'\n', 'ASCII'))
-        p.stdin.flush()
-        p.wait()
+    def crawling_drives(self):
+        def error(err):
+            print(err)
 
-    def locate_to_file(self):
-        cmd = ['sudo', '-S', 'locate', '*']
-        p = subprocess.Popen(cmd, stderr=subprocess.PIPE,
-                             stdin=subprocess.PIPE, stdout=self.temp_file)
-        p.stdin.write(bytes(self.sudo_passwd+'\n', 'ASCII'))
-        p.stdin.flush()
-        p.wait()
+        root_dir = b'/'
+        exclude = [b'.snapshots',
+                   b'dev',
+                   b'proc',
+                   b'root',
+                   b'home/ja/Documents/Linux']
+        self.tstart = datetime.now()
+
+        self.table = []
+        dir_list = []
+        file_list = []
+
+        for root, dirs, files in scandir.walk(root_dir, onerror=error):
+
+            dirs.sort()
+            dirs[:] = [d for d in dirs if d not in exclude]
+
+            for dname in dirs:
+                dir_list.append(('1', os.path.join(root, dname).decode(
+                    encoding='utf-8', errors='ignore')))
+            for fname in files:
+                file_list.append(('0', os.path.join(root, fname).decode(
+                    encoding='utf-8', errors='ignore')))
+
+        self.table = dir_list + file_list
+
+        print(str(datetime.now() - self.tstart))
 
     def new_database(self):
         global con
+
+        if os.path.exists(self.temp_db_path):
+            os.remove(self.temp_db_path)
+
         con = sqlite3.connect(self.temp_db_path, check_same_thread=False)
         cur = con.cursor()
-        cur.execute('CREATE TABLE locate_data_table(file_path_col TEXT)')
-        self.temp_file.seek(0)
-        for text_line in self.temp_file:
-            line = text_line.strip()
-            cur.execute('INSERT INTO locate_data_table VALUES (?)', (line,))
+        cur.execute('''CREATE VIRTUAL TABLE vt_locate_data_table
+                        USING fts4(directory, file_path_col)''')
 
-    def indexing_new_database(self):
-        con.execute('CREATE VIRTUAL TABLE vt_locate_data_table '
-                    'USING fts4(file_path_col TEXT)')
-        con.execute('INSERT INTO vt_locate_data_table '
-                    'SELECT * FROM locate_data_table')
+        self.tstart = datetime.now()
+
+        for x in self.table:
+            cur.execute('''INSERT INTO vt_locate_data_table VALUES
+                            (?, ?)''', (x[0], x[1]))
+
         con.commit()
+        print(str(datetime.now() - self.tstart))
 
     def replace_old_db_with_new(self):
         global con
@@ -106,22 +133,23 @@ class thread_database_update(QThread):
             return
         if not os.path.exists('/var/lib/angrysearch/'):
             cmd = ['sudo', 'mkdir', '/var/lib/angrysearch/']
-            p = subprocess.Popen(cmd, stderr=subprocess.PIPE,
+            p = subprocess.Popen(cmd, stdout=PIPE, stderr=subprocess.PIPE,
                                  stdin=subprocess.PIPE)
             p.stdin.write(bytes(self.sudo_passwd+'\n', 'ASCII'))
             p.stdin.flush()
             p.wait()
 
-        cmd = ['sudo', 'mv', '-f', self.temp_db_path, self.db_path]
+        cmd = ['sudo', '-S', 'mv', '-f', self.temp_db_path, self.db_path]
         p = subprocess.Popen(cmd, stderr=subprocess.PIPE,
                              stdin=subprocess.PIPE)
         p.stdin.write(bytes(self.sudo_passwd+'\n', 'ASCII'))
         p.stdin.flush()
         p.wait()
+
         con = sqlite3.connect(self.db_path, check_same_thread=False)
 
 
-# THE PRIMARY GUI WIDGET WITHIN THE MAINWINDOW
+# THE PRIMARY GUI, THE WIDGET WITHIN THE MAINWINDOW
 class center_widget(QWidget):
     def __init__(self):
         super(center_widget, self).__init__()
@@ -130,8 +158,8 @@ class center_widget(QWidget):
     def initUI(self):
         self.search_input = QLineEdit()
         self.main_list = QListView()
-        self.upd_button = QPushButton('updatedb')
-        self.upd_button.setToolTip('run sudo updated & update local database')
+        self.main_list.setItemDelegate(HTMLDelegate())
+        self.upd_button = QPushButton('update')
 
         grid = QGridLayout()
         grid.setSpacing(10)
@@ -141,24 +169,68 @@ class center_widget(QWidget):
         grid.addWidget(self.main_list, 2, 1, 4, 4)
         self.setLayout(grid)
 
+        self.setTabOrder(self.search_input, self.main_list)
+        self.setTabOrder(self.main_list, self.upd_button)
+
 
 # THE MAIN APPLICATION WINDOW WITH STATUS BAR AND LOGIC
 class GUI_MainWindow(QMainWindow):
-
     def __init__(self, parent=None):
         super(GUI_MainWindow, self).__init__(parent)
+        self.settings = QSettings('angrysearch', 'angrysearch')
+        self.set = {'file_manager': 'xdg-open',
+                    'file_manager_receives_file_path': False,
+                    'number_of_results': '500'}
+        self.read_settings()
         self.init_GUI()
 
+    def read_settings(self):
+        if self.settings.value('Last_Run/geometry'):
+            self.restoreGeometry(self.settings.value('Last_Run/geometry'))
+        else:
+            self.resize(640, 480)
+            qr = self.frameGeometry()
+            cp = QDesktopWidget().availableGeometry().center()
+            qr.moveCenter(cp)
+            self.move(qr.topLeft())
+
+        if self.settings.value('Last_Run/window_state'):
+            self.restoreState(self.settings.value('Last_Run/window_state'))
+
+        if self.settings.value('file_manager'):
+            if self.settings.value('file_manager') not in ['', 'xdg-open']:
+                self.set['file_manager'] = self.settings.value('file_manager')
+
+                if self.settings.value('file_manager_receives_file_path'):
+                    self.set['file_manager_receives_file_path'] = \
+                        self.string_to_boolean(self.settings.value(
+                            'file_manager_receives_file_path'))
+            else:
+                self.detect_file_manager()
+        else:
+            self.detect_file_manager()
+
+        if self.settings.value('number_of_results'):
+            if ((self.settings.value('number_of_results')).isdigit()):
+                self.set['number_of_results'] = \
+                    self.settings.value('number_of_results')
+
     def closeEvent(self, event):
-        pass
-        #event.ignore()
-        #self.hide()
+        self.settings.setValue('Last_Run/geometry', self.saveGeometry())
+        self.settings.setValue('Last_Run/window_state', self.saveState())
+        if not self.settings.value('file_manager'):
+            self.settings.setValue('file_manager', 'xdg-open')
+        if not self.settings.value('file_manager_receives_file_path'):
+            self.settings.setValue('file_manager_receives_file_path', 'false')
+        if not self.settings.value('number_of_results'):
+            self.settings.setValue('number_of_results', '500')
+        event.accept()
 
     def init_GUI(self):
         self.locale_current = locale.getdefaultlocale()
         self.icon = self.get_icon()
-        self.setGeometry(650, 150, 600, 500)
         self.setWindowIcon(self.icon)
+        self.model = QStandardItemModel()
 
         self.threads = []
         self.file_list = []
@@ -171,28 +243,29 @@ class GUI_MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
 
         self.center.main_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.center.main_list.doubleClicked.connect(self.double_click)
         self.center.main_list.clicked.connect(self.single_click)
+        self.center.main_list.activated.connect(self.double_click_enter)
 
         self.center.search_input.textChanged[str].connect(self.on_input_change)
         self.center.upd_button.clicked.connect(self.clicked_button_updatedb)
 
         self.show()
-        self.initialisation()
+        self.show_first_500()
         self.make_sys_tray()
-        self.detect_file_manager()
 
     def make_sys_tray(self):
         if QSystemTrayIcon.isSystemTrayAvailable():
             menu = QMenu()
-            exitAction = menu.addAction("exit")
+            menu.addAction('v0.9.1')
+            menu.addSeparator()
+            exitAction = menu.addAction('Quit')
             exitAction.triggered.connect(sys.exit)
 
             self.tray_icon = QSystemTrayIcon()
             self.tray_icon.setIcon(self.icon)
             self.tray_icon.setContextMenu(menu)
             self.tray_icon.show()
-            self.tray_icon.setToolTip("ANGRYsearch")
+            self.tray_icon.setToolTip('ANGRYsearch')
             self.tray_icon.activated.connect(self.sys_tray_clicking)
 
     def sys_tray_clicking(self, reason):
@@ -203,118 +276,191 @@ class GUI_MainWindow(QMainWindow):
             QCoreApplication.instance().quit()
 
     def get_icon(self):
-        base64_data = 'iVBORw0KGgoAAAANSUhEUgAAABYAAAAWCAYAAADEtGw7AAAABHN\
-                        CSVQICAgIfAhkiAAAAQNJREFUOI3t1M9KAlEcxfHPmP0xU6Ogo\
-                        G0teoCiHjAIfIOIepvKRUE9R0G0KNApfy0c8hqKKUMrD9zVGc4\
-                        9nPtlsgp5n6qSVSk7cBG8CJ6sEX63UEcXz4jE20YNPbygPy25Q\
-                        o6oE+fEPXFF7A5yA9Eg2sQDcU3sJd6k89O4iiMcYKVol3rH2Mc\
-                        a1meZ4hMdNPCIj+SjHHfFZU94/0Nwlv4rWoY7vhrdeLNoO86bG\
-                        lym/ge3lsHDdI2fojbBG6sUtzOiQ1wQOwk6GwWKHeJyHtxOcFi\
-                        0TpFaxmnhNcyIW45bQ6RS3Hq4MeB7Ltyahki9Gd2xidWiwG9va\
-                        nCZqi7xlZGVHfwN6+5nU/ccBUYAAAAASUVORK5CYII='
+        base64_data = '''iVBORw0KGgoAAAANSUhEUgAAABYAAAAWCAYAAADEtGw7AAAABHN
+                         CSVQICAgIfAhkiAAAAQNJREFUOI3t1M9KAlEcxfHPmP0xU6Ogo
+                         G0teoCiHjAIfIOIepvKRUE9R0G0KNApfy0c8hqKKUMrD9zVGc4
+                         9nPtlsgp5n6qSVSk7cBG8CJ6sEX63UEcXz4jE20YNPbygPy25Q
+                         o6oE+fEPXFF7A5yA9Eg2sQDcU3sJd6k89O4iiMcYKVol3rH2Mc
+                         a1meZ4hMdNPCIj+SjHHfFZU94/0Nwlv4rWoY7vhrdeLNoO86bG
+                         lym/ge3lsHDdI2fojbBG6sUtzOiQ1wQOwk6GwWKHeJyHtxOcFi
+                         0TpFaxmnhNcyIW45bQ6RS3Hq4MeB7Ltyahki9Gd2xidWiwG9va
+                         nCZqi7xlZGVHfwN6+5nU/ccBUYAAAAASUVORK5CYII='''
 
         pm = QPixmap()
         pm.loadFromData(base64.b64decode(base64_data))
         i = QIcon()
         i.addPixmap(pm)
-        return(i)
+        return i
 
     def on_input_change(self, input):
         if input == '':
-            self.initialisation()
+            self.show_first_500()
             return
-        self.tstart = datetime.now()
         search_terms = input.split(' ')
         t = '*'
         for x in search_terms:
             t += x + '*'
-        self.new_thread_new_query(t)
+        self.new_query_new_thread(t)
 
-    def new_thread_new_query(self, input):
+    def new_query_new_thread(self, input):
+        n = self.set['number_of_results']
         if len(self.threads) > 30:
             del self.threads[0:9]
-        self.threads.append(thread_db_query(input))
-        self.threads[-1].start()
-        self.threads[-1].db_query_signal.connect(self.database_query_done,
-                                                 Qt.QueuedConnection)
+        self.threads.append({'input': input,
+                            'thread': thread_db_query(input, n)})
+        self.threads[-1]['thread'].db_query_signal.connect(
+            self.database_query_done, Qt.QueuedConnection)
+        self.threads[-1]['thread'].start()
 
-    # CHECKS IF THE QUERY IS THE LAST ONE BEFORE SHOWING DATA
+    # CHECK IF THE QUERY IS THE LAST ONE BEFORE SHOWING THE DATA
     def database_query_done(self, db_query_result):
-        print(str(datetime.now() - self.tstart)[6:])
-        if self.threads[-1].isRunning():
+        if (db_query_result['input'] != self.threads[-1]['input']):
             return
-        self.update_file_list_results(db_query_result)
+        self.update_file_list_results(db_query_result['results'])
 
     def update_file_list_results(self, data):
-        model = QStringListModel(data)
-        self.center.main_list.setModel(model)
-        total = str(locale.format("%d", len(data), grouping=True))
+        self.model = QStandardItemModel()
+        file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
+        dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+
+        for n in data:
+            item = QStandardItem(n['bold_path'])
+            item.path = n['path']
+            if n['dir'] == '1':
+                item.setIcon(dir_icon)
+            else:
+                item.setIcon(file_icon)
+            self.model.appendRow(item)
+
+        self.center.main_list.setModel(self.model)
+        total = str(locale.format('%d', len(data), grouping=True))
         self.status_bar.showMessage(total)
 
     # RUNS ON START OR ON EMPTY INPUT
-    def initialisation(self):
+    def show_first_500(self):
         cur = con.cursor()
-        cur.execute('SELECT name FROM sqlite_master WHERE '
-                    'type="table" AND name="locate_data_table"')
+        cur.execute('''SELECT name FROM sqlite_master WHERE
+                        type="table" AND name="vt_locate_data_table"''')
         if cur.fetchone() is None:
-            self.status_bar.showMessage('Update the database')
+            self.status_bar.showMessage('0')
+            self.tutorial()
             return
 
-        cur.execute('SELECT file_path_col FROM locate_data_table LIMIT 500')
-        file_list = cur.fetchall()
-        cur.execute('SELECT Count() FROM locate_data_table')
+        cur.execute('''SELECT * FROM vt_locate_data_table
+                        LIMIT ?''', (self.set['number_of_results'],))
+        tuppled_500 = cur.fetchall()
+
+        bold_results_500 = []
+
+        for tup in tuppled_500:
+            item = {'dir': tup[0], 'path': tup[1], 'bold_path': tup[1]}
+            bold_results_500.append(item)
+
+        self.update_file_list_results(bold_results_500)
+        cur.execute('''SELECT COALESCE(MAX(rowid), 0)
+                        FROM vt_locate_data_table''')
         total_rows_numb = cur.fetchone()[0]
-
-        l = [i[0] for i in file_list]
-        self.update_file_list_results(l)
-        total = str(locale.format("%d", total_rows_numb, grouping=True))
+        total = str(locale.format('%d', total_rows_numb, grouping=True))
         self.status_bar.showMessage(str(total))
-        self.center.search_input.setFocus()
-
-    def single_click(self, QModelIndex):
-        path = QModelIndex.data()
-        self.status_bar.showMessage('')
-        if not os.path.exists(path):
-            self.status_bar.showMessage('not found - update database')
-            return
-
-        mime = subprocess.check_output(['xdg-mime', 'query', 'filetype', path])
-        mime = mime.decode("latin-1").strip()
-        defautl_app = subprocess.check_output(['xdg-mime', 'query',
-                                              'default', mime])
-        defautl_app = defautl_app.decode("utf-8").strip()
-        self.status_bar.showMessage(str(mime))
-
-    def double_click(self, QModelIndex):
-        print(self.file_manager)
-        path = QModelIndex.data()
-        if not os.path.exists(path):
-            self.status_bar.showMessage('not found - update database')
-            return
-
-        if os.path.isdir(path):
-            subprocess.Popen(['xdg-open', path])
-        else:
-            if self.file_manager == 'Dolphin.desktop':
-                cmd = ['dolphin', '--select', path]
-            elif self.file_manager == 'Nautilus.desktop':
-                cmd = ['nautilus', path]
-            elif self.file_manager == 'Nemo.desktop':
-                cmd = ['Nemo', path]
-            else:
-                parent_dir = os.path.abspath(os.path.join(path, os.pardir))
-                cmd = ['xdg-open', parent_dir]
-            subprocess.Popen(cmd)
 
     def detect_file_manager(self):
-        fm = subprocess.check_output(['xdg-mime', 'query',
-                                      'default', 'inode/directory'])
-        self.file_manager = fm.decode("utf-8").strip()
+        try:
+            fm = subprocess.check_output(['xdg-mime', 'query',
+                                          'default', 'inode/directory'])
+            detected_fm = fm.decode('utf-8').strip().lower()
+
+            known_fm = ['dolphin', 'nemo', 'nautilus', 'doublecmd']
+            if any(item in detected_fm for item in known_fm):
+                self.set['file_manager'] = detected_fm
+                print('autodetected file manager: ' + detected_fm)
+            else:
+                self.set['file_manager'] = 'xdg-open'
+        except Exception as err:
+            self.set['file_manager'] = 'xdg-open'
+            print(err)
+
+    def single_click(self, QModelIndex):
+        path = self.model.itemFromIndex(QModelIndex).path
+
+        if not os.path.exists(path):
+            self.status_bar.showMessage('NOT FOUND')
+            return
+
+        mime = subprocess.Popen(['xdg-mime', 'query', 'filetype', path],
+                                stdout=subprocess.PIPE)
+        mime.wait()
+        if mime.returncode == 0:
+            mime_type = mime.communicate()[0].decode('latin-1').strip()
+            self.status_bar.showMessage(str(mime_type))
+        elif mime.returncode == 5:
+            self.status_bar.showMessage(str('NO PERMISSION'))
+        else:
+            self.status_bar.showMessage(str('NOPE'))
+
+    def double_click_enter(self, QModelIndex):
+        path = self.model.itemFromIndex(QModelIndex).path
+
+        if not os.path.exists(path):
+            self.status_bar.showMessage('NOT FOUND')
+            return
+
+        fm = self.set['file_manager']
+
+        if os.path.isdir(path):
+            known_fm = ['dolphin', 'nemo', 'nautilus', 'doublecmd']
+            for x in known_fm:
+                if x in fm:
+                    subprocess.Popen([x, path])
+                    return
+            subprocess.Popen([fm, path])
+        else:
+            if 'dolphin' in fm:
+                cmd = ['dolphin', '--select', path]
+            elif 'nemo' in fm:
+                cmd = ['nemo', path]
+            elif 'nautilus' in fm:
+                cmd = ['nautilus', path]
+            elif 'doublecmd' in fm:
+                cmd = ['doublecmd', path]
+            else:
+                if self.set['file_manager_receives_file_path']:
+                    cmd = [fm, path]
+                else:
+                    parent_dir = os.path.abspath(os.path.join(path, os.pardir))
+                    cmd = [fm, parent_dir]
+            subprocess.Popen(cmd)
+
+    def tutorial(self):
+        chat = ['  ANGRYsearch',
+                '   • uses "locate" command to create own database',
+                '   • locate uses "updatedb" to update its own database',
+                '   • configuration can be find in /etc/updatedb.conf',
+                '   • there you can exclude paths from being searched',
+                '   • Btrfs users really want to exclude snapshots',
+                '',
+                '   • learn more about locate on it\'s manpage',
+                '   • learn more about updatedb on it\'s manpage',
+                '',
+                '   • ANGRYsearch database is in /var/lib/angrysearch/',
+                '   • with ~1 mil files indexed it\'s size is roughly 200MB',
+                '   • config file is in ~/.config/angrysearch/',
+                '   • currently you can set file manager manually there',
+                '   • otherwise xdg-open is used which might have few hickups',
+                '',
+                '  time to press the updatedb button in the top right corner'
+                ]
+        self.center.main_list.setModel(QStringListModel(chat))
 
     def clicked_button_updatedb(self):
         self.sud = sudo_dialog(self)
         self.sud.exec_()
-        self.initialisation()
+        self.show_first_500()
+
+    def string_to_boolean(self, str):
+        if str in ['true', 'True', 'yes', 'y', '1']:
+            return True
+        else:
+            return False
 
 
 # UPDATE DATABASE DIALOG WITH PROGRESS SHOWN
@@ -335,12 +481,10 @@ class sudo_dialog(QDialog):
         self.setWindowTitle('Database Update')
         self.label_0 = QLabel('sudo password:')
         self.passwd_input = QLineEdit()
-        self.passwd_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.label_1 = QLabel('• sudo updatedb')
-        self.label_2 = QLabel('• sudo locate * > /tmp/tempfile')
-        self.label_3 = QLabel('• new database from the tempfile')
-        self.label_4 = QLabel('• indexing the new databse')
-        self.label_5 = QLabel('• replacing  the old database\n  '
+        self.passwd_input.setEchoMode(QLineEdit.Password)
+        self.label_1 = QLabel('• crawling the file system')
+        self.label_2 = QLabel('• creating a new database')
+        self.label_3 = QLabel('• replacing old database\n  '
                               'with the new one')
         self.OK_button = QPushButton('OK')
         self.OK_button.setEnabled(False)
@@ -349,28 +493,22 @@ class sudo_dialog(QDialog):
         self.label_1.setIndent(19)
         self.label_2.setIndent(19)
         self.label_3.setIndent(19)
-        self.label_4.setIndent(19)
-        self.label_5.setIndent(19)
 
         # TO MAKE SQUARE BRACKETS NOTATION WORK LATER ON
         # ALSO THE REASON FOR CUSTOM __getitem__ & __setitem__
         self['label_1'] = self.label_1
         self['label_2'] = self.label_2
         self['label_3'] = self.label_3
-        self['label_4'] = self.label_4
-        self['label_5'] = self.label_5
 
         grid = QGridLayout()
-        grid.setSpacing(5)
+        grid.setSpacing(7)
         grid.addWidget(self.label_0, 0, 0)
         grid.addWidget(self.passwd_input, 0, 1)
         grid.addWidget(self.label_1, 1, 0, 1, 2)
         grid.addWidget(self.label_2, 2, 0, 1, 2)
         grid.addWidget(self.label_3, 3, 0, 1, 2)
-        grid.addWidget(self.label_4, 4, 0, 1, 2)
-        grid.addWidget(self.label_5, 5, 0, 1, 2)
-        grid.addWidget(self.OK_button, 6, 0)
-        grid.addWidget(self.cancel_button, 6, 1)
+        grid.addWidget(self.OK_button, 4, 0)
+        grid.addWidget(self.cancel_button, 4, 1)
         self.setLayout(grid)
 
         self.OK_button.clicked.connect(self.clicked_OK_update_db)
@@ -387,9 +525,9 @@ class sudo_dialog(QDialog):
     def clicked_OK_update_db(self):
         sudo_passwd = self.passwd_input.text()
         self.thread_updating = thread_database_update(sudo_passwd)
-        self.thread_updating.start()
         self.thread_updating.db_update_signal.connect(
             self.sudo_dialog_receive_signal, Qt.QueuedConnection)
+        self.thread_updating.start()
 
     def sudo_dialog_receive_signal(self, message):
         if message == 'the_end_of_the_update':
@@ -408,6 +546,43 @@ class sudo_dialog(QDialog):
         self.last_signal = message
 
 
+# CUSTOM DELEGATE TO GET HTML RICH TEXT IN LISTVIEW
+class HTMLDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super(HTMLDelegate, self).__init__(parent)
+        self.doc = QTextDocument(self)
+
+    def paint(self, painter, option, index):
+        painter.save()
+
+        options = QStyleOptionViewItemV4(option)
+        self.initStyleOption(options, index)
+
+        self.doc.setHtml(options.text)
+        options.text = ""
+
+        style = QApplication.style() if options.widget is None \
+            else options.widget.style()
+        style.drawControl(QStyle.CE_ItemViewItem, options, painter)
+
+        ctx = QAbstractTextDocumentLayout.PaintContext()
+
+        if option.state & QStyle.State_Selected:
+            ctx.palette.setColor(QPalette.Text, option.palette.color(
+                                 QPalette.Active, QPalette.HighlightedText))
+
+        textRect = style.subElementRect(QStyle.SE_ItemViewItemText, options)
+        painter.translate(textRect.topLeft())
+        self.doc.documentLayout().draw(painter, ctx)
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        options = QStyleOptionViewItemV4(option)
+        self.initStyleOption(options,index)
+        return QSize(self.doc.idealWidth(), self.doc.size().height())
+
+
 def open_database():
     path = '/var/lib/angrysearch/angry_database.db'
     temp = '/tmp/angry_database.db'
@@ -419,7 +594,7 @@ def open_database():
         return sqlite3.connect(temp, check_same_thread=False)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     con = open_database()
     with con:
         app = QApplication(sys.argv)
