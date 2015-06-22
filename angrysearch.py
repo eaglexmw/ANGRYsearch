@@ -5,8 +5,8 @@ import base64
 from datetime import datetime
 import locale
 import os
-from PySide.QtCore import *
-from PySide.QtGui import *
+from PyQt4.QtCore import *
+from PyQt4.QtGui import *
 import re
 import sqlite3
 import subprocess
@@ -23,7 +23,7 @@ except ImportError:
 # CALLED ON EVERY KEYPRESS
 # RETURNS FIRST 500(numb_results) RESULTS MATCHING THE QUERY
 class thread_db_query(QThread):
-    db_query_signal = Signal(dict)
+    db_query_signal = pyqtSignal(dict)
 
     def __init__(self, db_query, numb_results, parent=None):
         super(thread_db_query, self).__init__(parent)
@@ -64,8 +64,8 @@ class thread_db_query(QThread):
 # QTHREAD FOR UPDATING THE DATABASE
 # PREVENTS LOCKING UP THE GUI AND ALLOWS TO SHOW STEPS PROGRESS
 class thread_database_update(QThread):
-    db_update_signal = Signal(str)
-    crawl_signal = Signal(str)
+    db_update_signal = pyqtSignal(str)
+    crawl_signal = pyqtSignal(str)
 
     def __init__(self, sudo_passwd, settings, parent=None):
         self.db_path = '/var/lib/angrysearch/angry_database.db'
@@ -645,6 +645,10 @@ class HTMLDelegate(QStyledItemDelegate):
 
         textRect = style.subElementRect(QStyle.SE_ItemViewItemText, options)
         #textRect.adjust(0, 0, 0, 0)
+        thefuckyourshitup_constant = 4
+        margin = (option.rect.height() - options.fontMetrics.height()) // 2
+        margin = margin - thefuckyourshitup_constant
+        textRect.setTop(textRect.top()+margin)
         painter.translate(textRect.topLeft())
         self.doc.documentLayout().draw(painter, ctx)
 
