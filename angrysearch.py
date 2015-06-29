@@ -181,7 +181,6 @@ class center_widget(QWidget):
     def initUI(self):
         self.search_input = QLineEdit()
         self.main_list = QListView()
-        self.main_list.setItemDelegate(HTMLDelegate())
         self.upd_button = QPushButton('update')
 
         grid = QGridLayout()
@@ -271,6 +270,8 @@ class GUI_MainWindow(QMainWindow):
         self.setWindowTitle('ANGRYsearch')
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
+
+        self.center.main_list.setItemDelegate(self.HTMLDelegate())
 
         self.center.main_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.center.main_list.clicked.connect(self.single_click)
@@ -489,6 +490,44 @@ class GUI_MainWindow(QMainWindow):
         else:
             return False
 
+    # CUSTOM DELEGATE TO GET HTML RICH TEXT IN LISTVIEW
+    class HTMLDelegate(QStyledItemDelegate):
+        def __init__(self, parent=None):
+            super().__init__()
+            self.doc = QTextDocument(self)
+
+        def paint(self, painter, option, index):
+            painter.save()
+
+            options = QStyleOptionViewItemV4(option)
+            self.initStyleOption(options, index)
+
+            self.doc.setHtml(options.text)
+            options.text = ""
+
+            style = QApplication.style() if options.widget is None \
+                else options.widget.style()
+            style.drawControl(QStyle.CE_ItemViewItem, options, painter)
+
+            ctx = QAbstractTextDocumentLayout.PaintContext()
+
+            if option.state & QStyle.State_Selected:
+                ctx.palette.setColor(QPalette.Text, option.palette.color(
+                                     QPalette.Active, QPalette.HighlightedText))
+
+            textRect = style.subElementRect(QStyle.SE_ItemViewItemText, options)
+            thefuckyourshitup_constant = 4
+            margin = (option.rect.height() - options.fontMetrics.height()) // 2
+            margin = margin - thefuckyourshitup_constant
+            textRect.setTop(textRect.top()+margin)
+            painter.translate(textRect.topLeft())
+            self.doc.documentLayout().draw(painter, ctx)
+
+            painter.restore()
+
+        def sizeHint(self, option, index):
+            return QSize(self.doc.idealWidth(), self.doc.size().height())
+
 
 # UPDATE DATABASE DIALOG WITH PROGRESS SHOWN
 class sudo_dialog(QDialog):
@@ -618,48 +657,9 @@ class sudo_dialog(QDialog):
         self.passwd_input.setText(message[:19])
 
 
-# CUSTOM DELEGATE TO GET HTML RICH TEXT IN LISTVIEW
-class HTMLDelegate(QStyledItemDelegate):
-    def __init__(self, parent=None):
-        super(HTMLDelegate, self).__init__(parent)
-        self.doc = QTextDocument(self)
-
-    def paint(self, painter, option, index):
-        painter.save()
-
-        options = QStyleOptionViewItemV4(option)
-        self.initStyleOption(options, index)
-
-        self.doc.setHtml(options.text)
-        options.text = ""
-
-        style = QApplication.style() if options.widget is None \
-            else options.widget.style()
-        style.drawControl(QStyle.CE_ItemViewItem, options, painter)
-
-        ctx = QAbstractTextDocumentLayout.PaintContext()
-
-        if option.state & QStyle.State_Selected:
-            ctx.palette.setColor(QPalette.Text, option.palette.color(
-                                 QPalette.Active, QPalette.HighlightedText))
-
-        textRect = style.subElementRect(QStyle.SE_ItemViewItemText, options)
-        #textRect.adjust(0, 0, 0, 0)
-        thefuckyourshitup_constant = 4
-        margin = (option.rect.height() - options.fontMetrics.height()) // 2
-        margin = margin - thefuckyourshitup_constant
-        textRect.setTop(textRect.top()+margin)
-        painter.translate(textRect.topLeft())
-        self.doc.documentLayout().draw(painter, ctx)
-
-        painter.restore()
-
-    def sizeHint(self, option, index):
-        return QSize(self.doc.idealWidth(), self.doc.size().height())
-
-
 def open_database():
-    path = '/var/lib/angrysearch/angry_database.db'
+    home = os.path.expanduser('~')
+    path = home + '/.cache/angrysearch/angry_database.db'
     temp = '/tmp/angry_database.db'
     if os.path.exists(path):
         return sqlite3.connect(path, check_same_thread=False)
