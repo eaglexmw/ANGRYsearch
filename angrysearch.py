@@ -22,70 +22,64 @@ except ImportError:
 # QTHREAD FOR ASYNC SEARCHES IN THE DATABASE
 # CALLED ON EVERY KEYPRESS
 # RETURNS FIRST 500(numb_results) RESULTS MATCHING THE QUERY
-class thread_db_query(QThread):
+class Thread_db_query(QThread):
     db_query_signal = pyqtSignal(dict)
 
-    def __init__(self, db_query, numb_results, parent=None):
-        super(thread_db_query, self).__init__(parent)
-        self.numb_results = numb_results
+    def __init__(self, db_query, settings, parent=None):
+        super().__init__()
+        self.number_of_results = settings['number_of_results']
+        self.fts4 = settings['fts4']
         self.db_query = db_query
         self.sql_query = self.query_adjustment_for_sqlite(db_query)
-        strip_and_split = db_query.strip().split()
-        rx = '('+'|'.join(map(re.escape, strip_and_split))+')'
-        self.regex_queries = re.compile(rx, re.IGNORECASE)
 
     def run(self):
         cur = con.cursor()
-        cur.execute('''SELECT * FROM angry_table WHERE path MATCH ? LIMIT ?''',
-                    (self.sql_query, self.numb_results))
+        if self.fts4 == 'false':
+            cur.execute(
+                '''SELECT * FROM angry_table WHERE path LIKE ? LIMIT ?''',
+                (self.sql_query, self.number_of_results))
+        else:
+            cur.execute(
+                '''SELECT * FROM angry_table WHERE path MATCH ? LIMIT ?''',
+                (self.sql_query, self.number_of_results))
         tuppled_500 = cur.fetchall()
-
-        bold_results_500 = []
-
-        for tup in tuppled_500:
-            bold = self.bold_text(tup[1])
-            item = {'dir': tup[0], 'path': tup[1], 'bold_path': bold}
-            bold_results_500.append(item)
-
-        signal_message = {'input': self.db_query, 'results': bold_results_500}
+        signal_message = {'input': self.db_query, 'results': tuppled_500}
         self.db_query_signal.emit(signal_message)
 
-    def bold_text(self, line):
-        return re.sub(self.regex_queries, '<b>\\1</b>', line)
-
     def query_adjustment_for_sqlite(self, input):
-        search_terms = input.split()
-        t = '*'
-        for x in search_terms:
-            t += x + '*'
-        return t
+        if self.fts4 == 'false':
+            joined = '%'.join(input.split())
+            return '%{0}%'.format(joined)
+        else:
+            joined = '*'.join(input.split())
+            return '*{0}*'.format(joined)
 
 
-# QTHREAD FOR UPDATING THE DATABASE
-# PREVENTS LOCKING UP THE GUI AND ALLOWS TO SHOW STEPS PROGRESS
-class thread_database_update(QThread):
-    db_update_signal = pyqtSignal(str)
+# THREAD FOR UPDATING THE DATABASE
+# PREVENTS LOCKING UP THE GUI AND ALLOWS TO SHOW PROGRESS
+class Thread_database_update(QThread):
+    db_update_signal = pyqtSignal(str, str)
     crawl_signal = pyqtSignal(str)
 
-    def __init__(self, sudo_passwd, settings, parent=None):
-        self.db_path = '/var/lib/angrysearch/angry_database.db'
-        self.temp_db_path = '/tmp/angry_database.db'
-        super(thread_database_update, self).__init__(parent)
-        self.sudo_passwd = sudo_passwd
+    def __init__(self, settings, parent=None):
+        super().__init__()
         self.settings = settings
         self.table = []
+        self.tstart = None
+        self.crawl_time = None
+        self.database_time = None
 
     def run(self):
-        self.db_update_signal.emit('label_1')
+        self.db_update_signal.emit('label_1', None)
         self.crawling_drives()
 
-        self.db_update_signal.emit('label_2')
+        self.db_update_signal.emit('label_2', self.crawl_time)
         self.new_database()
 
-        self.db_update_signal.emit('label_3')
+        self.db_update_signal.emit('label_3', self.database_time)
         self.replace_old_db_with_new()
 
-        self.db_update_signal.emit('the_end_of_the_update')
+        self.db_update_signal.emit('the_end_of_the_update', None)
 
     def crawling_drives(self):
         def error(err):
@@ -97,6 +91,9 @@ class thread_database_update(QThread):
         if self.settings.value('directories_excluded'):
             q = self.settings.value('directories_excluded').strip().split()
             exclude = [x.encode() for x in q]
+
+        exclude.append(b'proc')
+
         root_dir = b'/'
         self.tstart = datetime.now()
 
@@ -126,15 +123,17 @@ class thread_database_update(QThread):
 
         self.table = dir_list + file_list
 
-        print(str(datetime.now() - self.tstart))
+        self.crawl_time = datetime.now() - self.tstart
+        self.crawl_time = self.time_difference(self.crawl_time.seconds)
 
     def new_database(self):
         global con
+        temp_db_path = '/tmp/angry_database.db'
 
-        if os.path.exists(self.temp_db_path):
-            os.remove(self.temp_db_path)
+        if os.path.exists(temp_db_path):
+            os.remove(temp_db_path)
 
-        con = sqlite3.connect(self.temp_db_path, check_same_thread=False)
+        con = sqlite3.connect(temp_db_path, check_same_thread=False)
         cur = con.cursor()
         cur.execute('''CREATE VIRTUAL TABLE angry_table
                         USING fts4(directory, path)''')
@@ -146,40 +145,46 @@ class thread_database_update(QThread):
                         (x[0], x[1]))
 
         con.commit()
-        print(str(datetime.now() - self.tstart))
+        self.database_time = datetime.now() - self.tstart
+        self.database_time = self.time_difference(self.database_time.seconds)
 
     def replace_old_db_with_new(self):
         global con
 
-        if not os.path.exists(self.temp_db_path):
+        home = os.path.expanduser('~')
+        db_path = home + '/.cache/angrysearch/angry_database.db'
+        temp_db_path = '/tmp/angry_database.db'
+
+        dir_path = os.path.dirname(db_path)
+
+        if not os.path.exists(temp_db_path):
             return
-        if not os.path.exists('/var/lib/angrysearch/'):
-            cmd = ['sudo', 'mkdir', '/var/lib/angrysearch/']
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE,
-                                 stdin=subprocess.PIPE)
-            p.stdin.write(bytes(self.sudo_passwd+'\n', 'ASCII'))
-            p.stdin.flush()
+        if not os.path.exists(dir_path):
+            cmd = ['install', '-d', dir_path]
+            p = subprocess.Popen(cmd)
             p.wait()
 
-        cmd = ['sudo', '-S', 'mv', '-f', self.temp_db_path, self.db_path]
-        p = subprocess.Popen(cmd, stderr=subprocess.PIPE,
-                             stdin=subprocess.PIPE)
-        p.stdin.write(bytes(self.sudo_passwd+'\n', 'ASCII'))
-        p.stdin.flush()
+        cmd = ['mv', '-f', temp_db_path, db_path]
+        p = subprocess.Popen(cmd,
+                             stderr=subprocess.PIPE)
         p.wait()
 
-        con = sqlite3.connect(self.db_path, check_same_thread=False)
+        con = sqlite3.connect(db_path, check_same_thread=False)
+
+    def time_difference(self, nseconds):
+        mins, secs = divmod(nseconds, 60)
+        return '{:0>2d}:{:0>2d}'.format(mins, secs)
 
 
 # THE PRIMARY GUI, THE WIDGET WITHIN THE MAINWINDOW
-class center_widget(QWidget):
+class Center_widget(QWidget):
     def __init__(self):
-        super(center_widget, self).__init__()
+        super(Center_widget, self).__init__()
         self.initUI()
 
     def initUI(self):
         self.search_input = QLineEdit()
+        self.fts4_checkbox = QCheckBox()
         self.main_list = QListView()
         self.upd_button = QPushButton('update')
 
@@ -187,6 +192,7 @@ class center_widget(QWidget):
         grid.setSpacing(10)
 
         grid.addWidget(self.search_input, 1, 1)
+        grid.addWidget(self.fts4_checkbox, 1, 3)
         grid.addWidget(self.upd_button, 1, 4)
         grid.addWidget(self.main_list, 2, 1, 4, 4)
         self.setLayout(grid)
@@ -200,7 +206,8 @@ class GUI_MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super(GUI_MainWindow, self).__init__(parent)
         self.settings = QSettings('angrysearch', 'angrysearch')
-        self.set = {'file_manager': 'xdg-open',
+        self.set = {'fts4': 'true',
+                    'file_manager': 'xdg-open',
                     'file_manager_receives_file_path': False,
                     'number_of_results': '500',
                     'directories_excluded': []}
@@ -219,6 +226,11 @@ class GUI_MainWindow(QMainWindow):
 
         if self.settings.value('Last_Run/window_state'):
             self.restoreState(self.settings.value('Last_Run/window_state'))
+
+        if self.settings.value('fast_search_but_no_substring'):
+            fts4 = self.settings.value('fast_search_but_no_substring')
+            if fts4.lower() in ['false', 'no', '0', 'n', 'none', 'nope']:
+                self.set['fts4'] = 'false'
 
         if self.settings.value('file_manager'):
             if self.settings.value('file_manager') not in ['', 'xdg-open']:
@@ -243,8 +255,8 @@ class GUI_MainWindow(QMainWindow):
                 self.settings.value('directories_excluded').strip().split()
 
     def closeEvent(self, event):
-        self.settings.setValue('Last_Run/geometry', self.saveGeometry())
-        self.settings.setValue('Last_Run/window_state', self.saveState())
+        if not self.settings.value('fast_search_but_no_substring'):
+            self.settings.setValue('fast_search_but_no_substring', 'true')
         if not self.settings.value('file_manager'):
             self.settings.setValue('file_manager', 'xdg-open')
         if not self.settings.value('file_manager_receives_file_path'):
@@ -253,23 +265,36 @@ class GUI_MainWindow(QMainWindow):
             self.settings.setValue('number_of_results', '500')
         if not self.settings.value('directories_excluded'):
             self.settings.setValue('directories_excluded', '')
+        self.settings.setValue('Last_Run/geometry', self.saveGeometry())
+        self.settings.setValue('Last_Run/window_state', self.saveState())
         event.accept()
 
     def init_GUI(self):
         self.locale_current = locale.getdefaultlocale()
         self.icon = self.get_icon()
         self.setWindowIcon(self.icon)
+        self.dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+        self.file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
+
         self.model = QStandardItemModel()
 
         self.threads = []
         self.file_list = []
 
-        self.center = center_widget()
+        self.center = Center_widget()
         self.setCentralWidget(self.center)
 
         self.setWindowTitle('ANGRYsearch')
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
+
+        self.center.fts4_checkbox.setToolTip(
+            'check = fts4 indexing, fast\n'
+            'uncheck = substrings work, slower')
+
+        if self.set['fts4'] == 'true':
+            self.center.fts4_checkbox.setChecked(True)
+        self.center.fts4_checkbox.stateChanged.connect(self.checkbox_fts_click)
 
         self.center.main_list.setItemDelegate(self.HTMLDelegate())
 
@@ -332,11 +357,11 @@ class GUI_MainWindow(QMainWindow):
             return
 
         if len(self.threads) > 30:
-            del self.threads[0:9]
+            del self.threads[0:20]
 
         self.threads.append({'input': input,
-                            'thread': thread_db_query(
-                                input, self.set['number_of_results'])})
+                            'thread': Thread_db_query(
+                                input, self.set)})
 
         self.threads[-1]['thread'].db_query_signal.connect(
             self.database_query_done, Qt.QueuedConnection)
@@ -346,27 +371,36 @@ class GUI_MainWindow(QMainWindow):
     def database_query_done(self, db_query_result):
         if (db_query_result['input'] != self.threads[-1]['input']):
             return
-        self.update_file_list_results(db_query_result['results'])
+        self.process_database_resuls(db_query_result)
 
-    def update_file_list_results(self, data):
+    # FORMAT DATA FOR THE MODEL
+    def process_database_resuls(self, data):
         self.model = QStandardItemModel()
-        # dir_icon = QIcon('icons/adwa_dir.png')
-        # file_icon = QIcon('icons/adwa_file.png')
-        dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
-        file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
+        typed_text = data['input']
+        results = data['results']
 
-        for n in data:
-            item = QStandardItem(n['bold_path'])
-            item.path = n['path']
-            if n['dir'] == '1':
-                item.setIcon(dir_icon)
+        strip_and_split = typed_text.strip().split()
+        rx = '('+'|'.join(map(re.escape, strip_and_split))+')'
+        self.regex_queries = re.compile(rx, re.IGNORECASE)
+
+        for tup in results:
+            path = tup[1]
+            if typed_text:
+                path = self.bold_text(tup[1])
+            item = QStandardItem(path)
+            item.path = tup[1]
+            if tup[0] == '1':
+                item.setIcon(self.dir_icon)
             else:
-                item.setIcon(file_icon)
+                item.setIcon(self.file_icon)
             self.model.appendRow(item)
 
         self.center.main_list.setModel(self.model)
-        total = str(locale.format('%d', len(data), grouping=True))
+        total = str(locale.format('%d', len(results), grouping=True))
         self.status_bar.showMessage(total)
+
+    def bold_text(self, line):
+        return re.sub(self.regex_queries, '<b>\\1</b>', line)
 
     # RUNS ON START OR ON EMPTY INPUT
     def show_first_500(self):
@@ -382,17 +416,12 @@ class GUI_MainWindow(QMainWindow):
                     (self.set['number_of_results'],))
         tuppled_500 = cur.fetchall()
 
-        bold_results_500 = []
+        self.process_database_resuls({'input': '', 'results': tuppled_500})
 
-        for tup in tuppled_500:
-            item = {'dir': tup[0], 'path': tup[1], 'bold_path': tup[1]}
-            bold_results_500.append(item)
-
-        self.update_file_list_results(bold_results_500)
         cur.execute('''SELECT COALESCE(MAX(rowid), 0) FROM angry_table''')
         total_rows_numb = cur.fetchone()[0]
-        total = str(locale.format('%d', total_rows_numb, grouping=True))
-        self.status_bar.showMessage(str(total))
+        total = locale.format('%d', total_rows_numb, grouping=True)
+        self.status_bar.showMessage(total)
 
     def detect_file_manager(self):
         try:
@@ -461,6 +490,16 @@ class GUI_MainWindow(QMainWindow):
                     cmd = [fm, parent_dir]
             subprocess.Popen(cmd)
 
+    def checkbox_fts_click(self, state):
+        if state == Qt.Checked:
+            self.set['fts4'] = 'true'
+            self.settings.setValue('fast_search_but_no_substring', 'true')
+            self.center.search_input.setFocus()
+        else:
+            self.set['fts4'] = 'false'
+            self.settings.setValue('fast_search_but_no_substring', 'false')
+            self.center.search_input.setFocus()
+
     def tutorial(self):
         chat = ['   • config file is in ~/.config/angrysearch/',
                 '',
@@ -479,8 +518,8 @@ class GUI_MainWindow(QMainWindow):
             'READ, then press the update button in the top right corner')
 
     def clicked_button_updatedb(self):
-        self.sud = sudo_dialog(self)
-        self.sud.exec_()
+        self.u = Update_dialog_window(self)
+        self.u.exec_()
         self.show_first_500()
         self.center.search_input.setFocus()
 
@@ -530,11 +569,11 @@ class GUI_MainWindow(QMainWindow):
 
 
 # UPDATE DATABASE DIALOG WITH PROGRESS SHOWN
-class sudo_dialog(QDialog):
+class Update_dialog_window(QDialog):
     def __init__(self, parent):
+        super().__init__(parent)
         self.values = dict()
         self.last_signal = ''
-        super(sudo_dialog, self).__init__(parent)
         self.settings = QSettings('angrysearch', 'angrysearch')
         self.initUI()
 
@@ -553,14 +592,12 @@ class sudo_dialog(QDialog):
         self.setWindowTitle('Database Update')
         self.excluded_label = QLabel('ignored directories:')
         self.excluded_dirs_btn = QPushButton(self.excluded_dirs)
-        self.label_0 = QLabel('sudo password:')
-        self.passwd_input = QLineEdit()
-        self.passwd_input.setEchoMode(QLineEdit.Password)
+        self.crawl0_label = QLabel('progress:')
+        self.crawl_label = QLabel('')
         self.label_1 = QLabel('• crawling the file system')
         self.label_2 = QLabel('• creating new database')
         self.label_3 = QLabel('• replacing old database')
         self.OK_button = QPushButton('OK')
-        self.OK_button.setEnabled(False)
         self.cancel_button = QPushButton('Cancel')
 
         if self.excluded_dirs == '':
@@ -571,7 +608,7 @@ class sudo_dialog(QDialog):
         self.label_2.setIndent(70)
         self.label_3.setIndent(70)
 
-        self.passwd_input.setMinimumWidth(170)
+        self.crawl_label.setMinimumWidth(170)
 
         self.excluded_dirs_btn.clicked.connect(self.exclude_dialog)
 
@@ -585,8 +622,8 @@ class sudo_dialog(QDialog):
         grid.setSpacing(7)
         grid.addWidget(self.excluded_label, 0, 0)
         grid.addWidget(self.excluded_dirs_btn, 0, 1)
-        grid.addWidget(self.label_0, 1, 0)
-        grid.addWidget(self.passwd_input, 1, 1)
+        grid.addWidget(self.crawl0_label, 1, 0)
+        grid.addWidget(self.crawl_label, 1, 1)
         grid.addWidget(self.label_1, 2, 0, 1, 2)
         grid.addWidget(self.label_2, 3, 0, 1, 2)
         grid.addWidget(self.label_3, 4, 0, 1, 2)
@@ -596,9 +633,8 @@ class sudo_dialog(QDialog):
 
         self.OK_button.clicked.connect(self.clicked_OK_update_db)
         self.cancel_button.clicked.connect(self.clicked_cancel)
-        self.passwd_input.textChanged[str].connect(self.password_typed)
 
-        self.passwd_input.setFocus()
+        self.OK_button.setFocus()
 
     def password_typed(self, input):
         if len(input) > 0:
@@ -624,37 +660,32 @@ class sudo_dialog(QDialog):
         self.accept()
 
     def clicked_OK_update_db(self):
-        sudo_passwd = self.passwd_input.text()
-        self.thread_updating = thread_database_update(
-            sudo_passwd, self.settings)
+        self.thread_updating = Thread_database_update(self.settings)
         self.thread_updating.db_update_signal.connect(
-            self.sudo_dialog_receive_signal, Qt.QueuedConnection)
+            self.upd_dialog_receives_signal, Qt.QueuedConnection)
         self.thread_updating.crawl_signal.connect(
-            self.sudo_dialog_receive_crawl, Qt.QueuedConnection)
-
-        self.label_0.setText('crawling in:')
-        self.passwd_input.setEchoMode(QLineEdit.Normal)
+            self.upd_dialog_receives_crawl, Qt.QueuedConnection)
 
         self.thread_updating.start()
 
-    def sudo_dialog_receive_signal(self, message):
+    def upd_dialog_receives_signal(self, message, time=''):
         if message == 'the_end_of_the_update':
             self.accept()
             return
 
         label = self[message]
-        label_alt = '➔' + label.text()[1:]
+        label_alt = '➔{}'.format(label.text()[1:])
         label.setText(label_alt)
 
         if self.last_signal:
             prev_label = self[self.last_signal]
-            prev_label_alt = '✔' + prev_label.text()[1:]
+            prev_label_alt = '✔{} - {}'.format(prev_label.text()[1:], time)
             prev_label.setText(prev_label_alt)
 
         self.last_signal = message
 
-    def sudo_dialog_receive_crawl(self, message):
-        self.passwd_input.setText(message[:19])
+    def upd_dialog_receives_crawl(self, message):
+        self.crawl_label.setText(message)
 
 
 def open_database():
