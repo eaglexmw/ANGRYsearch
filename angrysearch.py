@@ -19,9 +19,9 @@ except ImportError:
     SCANDIR_AVAILABLE = False
 
 
-# QTHREAD FOR ASYNC SEARCHES IN THE DATABASE
-# CALLED ON EVERY KEYPRESS
-# RETURNS FIRST 500(numb_results) RESULTS MATCHING THE QUERY
+# THREAD FOR ASYNC SEARCHES IN THE DATABASE, CALLED ON EVERY KEYPRESS
+# RETURNS FIRST 500(number_of_results) RESULTS MATCHING THE QUERY
+# fts4 VALUE DECIDES IF USE FAST INDEXED "MATCH" OR SUBSTRING "LIKE"
 class Thread_db_query(QThread):
     db_query_signal = pyqtSignal(dict)
 
@@ -107,7 +107,6 @@ class Thread_database_update(QThread):
             ror = os
 
         for root, dirs, files in ror.walk(root_dir, onerror=error):
-
             dirs.sort()
             files.sort()
             dirs[:] = [d for d in dirs if d not in exclude]
@@ -202,9 +201,9 @@ class Center_widget(QWidget):
 
 
 # THE MAIN APPLICATION WINDOW WITH THE STATUS BAR AND LOGIC
-class GUI_MainWindow(QMainWindow):
+class Gui_MainWindow(QMainWindow):
     def __init__(self, parent=None):
-        super(GUI_MainWindow, self).__init__(parent)
+        super().__init__()
         self.settings = QSettings('angrysearch', 'angrysearch')
         self.set = {'fts4': 'true',
                     'file_manager': 'xdg-open',
@@ -315,7 +314,7 @@ class GUI_MainWindow(QMainWindow):
     def make_sys_tray(self):
         if QSystemTrayIcon.isSystemTrayAvailable():
             menu = QMenu()
-            menu.addAction('v0.9.2')
+            menu.addAction('v0.9.3')
             menu.addSeparator()
             exitAction = menu.addAction('Quit')
             exitAction.triggered.connect(sys.exit)
@@ -351,6 +350,8 @@ class GUI_MainWindow(QMainWindow):
         i.addPixmap(pm)
         return i
 
+    # CALLED ON EVERY TEXT CHANGE IN THE SEARCH INPUT
+    # QUERY THE DATABASE, LIST OF QUERIES TO KNOW THE LAST ONE
     def new_query_new_thread(self, input):
         if input == '':
             self.show_first_500()
@@ -494,24 +495,29 @@ class GUI_MainWindow(QMainWindow):
         if state == Qt.Checked:
             self.set['fts4'] = 'true'
             self.settings.setValue('fast_search_but_no_substring', 'true')
-            self.center.search_input.setFocus()
         else:
             self.set['fts4'] = 'false'
             self.settings.setValue('fast_search_but_no_substring', 'false')
-            self.center.search_input.setFocus()
+        current_search = self.center.search_input.text()
+        self.new_query_new_thread(current_search)
+        self.center.search_input.setFocus()
 
     def tutorial(self):
-        chat = ['   • config file is in ~/.config/angrysearch/',
-                '',
-                '   • ignored directories are space separated names',
-                '   • e.g. - "dev proc .snapshots"',
-                '   • Btrfs users really want to exclude snapshots',
-                '   • you can set file manager manually in the config',
-                '   • otherwise xdg-open is used which might have few hickups',
-                '',
-                '   • the database is in /var/lib/angrysearch/',
-                '   • with ~1 mil files indexed it\'s size is roughly 200MB',
-                ]
+        chat = [
+            '   • the database is in ~/.cache/angrysearch/angry_database.db',
+            '   • ~1 mil files can take ~200MB and ~1m30s to index',
+            '',
+            '   • double-click opens the location in file manager',
+            '',
+            '   • checkbox in the right top corner changes search behavior',
+            '   • by default checked, it provides very fast searching',
+            '   • drawback is that it can\'t do word bound substrings',
+            '   • it would not find "Pi<b>rate</b>s", or Whip<b>lash</b>"',
+            '   • it would find "<b>Pir</b>ates", or "The-<b>Fif</b>th"',
+            '   • unchecking it provides substring searches, but slower',
+            '',
+            '   • config file is in ~/.config/angrysearch/angrysearch.conf',
+            ]
 
         self.center.main_list.setModel(QStringListModel(chat))
         self.status_bar.showMessage(
@@ -519,9 +525,15 @@ class GUI_MainWindow(QMainWindow):
 
     def clicked_button_updatedb(self):
         self.u = Update_dialog_window(self)
+        self.u.window_close_signal.connect(
+            self.update_window_close, Qt.QueuedConnection)
         self.u.exec_()
-        self.show_first_500()
         self.center.search_input.setFocus()
+
+    def update_window_close(self, text):
+        if text == 'update_win_ok':
+            self.center.search_input.setText('')
+            self.show_first_500()
 
     def string_to_boolean(self, str):
         if str in ['true', 'True', 'yes', 'y', '1']:
@@ -539,8 +551,8 @@ class GUI_MainWindow(QMainWindow):
             painter.save()
 
             options = QStyleOptionViewItemV4(option)
-            self.initStyleOption(options, index)
 
+            self.initStyleOption(options, index)
             self.doc.setHtml(options.text)
             options.text = ""
 
@@ -552,13 +564,16 @@ class GUI_MainWindow(QMainWindow):
 
             if option.state & QStyle.State_Selected:
                 ctx.palette.setColor(QPalette.Text, option.palette.color(
-                                     QPalette.Active, QPalette.HighlightedText))
+                    QPalette.Active, QPalette.HighlightedText))
 
-            textRect = style.subElementRect(QStyle.SE_ItemViewItemText, options)
+            textRect = style.subElementRect(
+                QStyle.SE_ItemViewItemText, options)
+
             thefuckyourshitup_constant = 4
             margin = (option.rect.height() - options.fontMetrics.height()) // 2
             margin = margin - thefuckyourshitup_constant
             textRect.setTop(textRect.top()+margin)
+
             painter.translate(textRect.topLeft())
             self.doc.documentLayout().draw(painter, ctx)
 
@@ -570,6 +585,8 @@ class GUI_MainWindow(QMainWindow):
 
 # UPDATE DATABASE DIALOG WITH PROGRESS SHOWN
 class Update_dialog_window(QDialog):
+    window_close_signal = pyqtSignal(str)
+
     def __init__(self, parent):
         super().__init__(parent)
         self.values = dict()
@@ -636,10 +653,6 @@ class Update_dialog_window(QDialog):
 
         self.OK_button.setFocus()
 
-    def password_typed(self, input):
-        if len(input) > 0:
-            self.OK_button.setEnabled(True)
-
     def exclude_dialog(self):
         text, ok = QInputDialog.getText(self, '~/.config/angrysearch/',
                                         'Directories to be ignored:',
@@ -655,8 +668,10 @@ class Update_dialog_window(QDialog):
             else:
                 self.excluded_dirs_btn.setText(text)
                 self.excluded_dirs_btn.setStyleSheet("color:#000;")
+            self.OK_button.setFocus()
 
     def clicked_cancel(self):
+        self.window_close_signal.emit('update_win_cancel')
         self.accept()
 
     def clicked_OK_update_db(self):
@@ -670,6 +685,7 @@ class Update_dialog_window(QDialog):
 
     def upd_dialog_receives_signal(self, message, time=''):
         if message == 'the_end_of_the_update':
+            self.window_close_signal.emit('update_win_ok')
             self.accept()
             return
 
@@ -704,5 +720,5 @@ if __name__ == '__main__':
     con = open_database()
     with con:
         app = QApplication(sys.argv)
-        ui = GUI_MainWindow()
+        ui = Gui_MainWindow()
         sys.exit(app.exec_())

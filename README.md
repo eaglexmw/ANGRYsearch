@@ -1,17 +1,48 @@
 # ANGRYsearch
 Linux file search, instant results as you type
 
-Attempt at making Linux version of Everything Search Engine, or MasterSeeker, or Hddb File Search, because no one else bothered.
-Everyone seems to be damn content with linux file searches which are slow, populating results as they go, cli based only, heavily integrated with a file manager, limited to home directory, or are trying to be everything with full-text content search.
+PyQt4 version
 
-![alt tag](http://i.imgur.com/TyH60mq.gif)
+This is lighter, faster to index version, results are not in table but simple list.
+Only full path is displayed, no size, no date, no icons for various file types.
 
-Done in python, using PyQt5 for GUI
 
-How it works:
+![alt tag](http://i.imgur.com/H7ptdGG.gif)
 
-* source for the data are [locate](http://linux.die.net/man/1/locate) and [updatedb](http://linux.die.net/man/1/updatedb) commands
-* program exports all locate data in to a temp file 'locate * > /tmp/tempfile'
-* from the tempfile a database is build and indexed
-* then its available for querys, returning 500 results per search
+### How to make it work on your system:
 
+**dependencies** - `python-pyqt4`, `libxkbcommon-x11`, `xdg-utils`
+
+download the latest pyqt4 release of ANGRYsearch, unpack it, go in to the containing directory
+* **if you just want to test it, you can run it right away**
+  * `python3 angrysearch.py`
+  * once you are done testing, remember to remove the database that is created in
+    `~/.cache/angrysearch/angry_database.db`
+
+for a long term usage on your system you need to find some place for it,
+lets say /opt/angrysearch, copy all the files there, make the main one executable,
+and make some links to these files to integrate ANGRYsearch in to your system well.
+
+* create angrysearch folder in /opt
+
+        sudo mkdir /opt/angrysearch
+
+* go where you extracted the latest release, go deeper inside, copy all the files to /opt/angrysearch
+
+        sudo cp -r * /opt/angrysearch
+
+* make the main python file executable
+
+        sudo chmod +x /opt/angrysearch/angrysearch.py
+
+* make a link in /usr/share/applications to the desktop file so that angrysearch appears in your launchers and start menus
+
+        sudo ln -s /opt/angrysearch/angrysearch.desktop /usr/share/applications
+
+* would be nice if it would have some distinguishable icon, make a link to the icon
+
+        sudo ln -s /opt/angrysearch/icons/angrysearch.svg /usr/share/pixmaps
+
+* to be able to run angrysearch from terminal anywhere by just writing `angrysearch` , make this link
+
+        sudo ln -s /opt/angrysearch/angrysearch.py /usr/bin/angrysearch
